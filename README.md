@@ -47,17 +47,17 @@ Built in `data.py::synth_generation_mix` (MW, half-hourly, ~30 GW typical demand
 | Solar (national) | `synth_solar_national` | Bell-shaped diurnal, seasonal amplitude, cloud noise. ~15 GW peak capacity. |
 | Wind | `synth_wind_national` | AR(1) weather-driven CF, no diurnal cycle, mild seasonal (windier winter). ~30 GW capacity. |
 | Nuclear | `synth_nuclear_national` | Near-flat ~5.5 GW baseload, 4 fictitious units with rare on/off outage steps. |
-| CCGT | inside `synth_generation_mix` | Flexible mid-merit, **fills the residual** demand gap after weather + baseload + interconnects. |
-| Coal | inside `synth_generation_mix` | Near-zero almost always; only switches on when residual exceeds CCGT comfort (winter peak tightness). |
+| CCGT | inside `synth_generation_mix` | Flexible marginal plant, **follows the entire residual** demand after weather + baseload + interconnectors. (GB is **coal-free** since 30 Sep 2024 — no coal stack; winter-peak spikes come from a scarcity term in the price model.) |
 | Biomass | `synth_biomass_national` | Steady ~2.5 GW baseload (Drax-like). |
 | Hydro + PS | `synth_hydro_national` | Small (~0.3–1.5 GW), peaker shape around evening demand. |
 | Interconnectors | `synth_interconnectors` | Net imports swing with a diurnal pattern + noise (proxy for cross-border spread). |
 
 The mix is then fed to `synth_price`, which forms a CCGT-marginal price pulled DOWN
-by renewables share and pushed UP by system tightness + coal-on periods. So
-windy/sunny periods can clear cheap (sometimes negative); winter peak tightness with
-coal on produces spikes. The imbalance price adds a Student-t spread whose scale
-grows with tightness.
+by renewables share and pushed UP by system tightness, with a convex **scarcity**
+adder as residual demand nears the gas-fleet headroom (`FLEX_GAS_REF_MW`). So
+windy/sunny periods can clear cheap (sometimes negative); tight winter-peak periods
+leaning on pricey peaking gas / imports produce spikes. The imbalance price adds a
+Student-t spread whose scale grows with tightness.
 
 The forecaster (`forecast.py::ctx_from_portfolio`) consumes the mix and prices as
 features (day-ahead price, lagged imbalance, lagged renewables share, lagged
@@ -83,15 +83,26 @@ case for the data-science role, made measurable.
 
 ## Switching to real data (run locally — sandbox can't reach these domains)
 
-All sources are public and **need no API key**:
+All sources are public and **need no API key**. The quickest path is the toggle in
+`explore.ipynb` (`USE_REAL_DATA = True`), or in code:
+
+```python
+p = data.build_portfolio(n_sites=5, real=True,
+                         date_from="2025-01-06", date_to="2025-01-27")
+```
+
+This calls `data.real_context`, which assembles the real GB mix + prices into the
+**same canonical schema** as the synthetic path (so forecast/dispatch/settle work
+unchanged). Underneath:
 
 - **Elexon BMRS** `FUELHH` (half-hourly per-fuel generation — solar, wind, nuclear,
-  CCGT, coal, biomass, hydro, interconnectors), `INDO`/`ITSDO` (demand), `NDF`
-  (national demand forecast = a real benchmark), and
-  `balancing/settlement/system-prices/{date}` (imbalance price).
-  See `real_elexon_fuelhh` (long format) and `real_elexon_fuelhh_wide` (pivoted to
-  one column per fuel — drop-in replacement for the synthetic mix) in `data.py`.
-  Docs: https://developer.data.elexon.co.uk/
+  CCGT, biomass, hydro, interconnectors; the COAL column is now ~0), `INDO`/`ITSDO`
+  (demand), `NDF` (national demand forecast = a real benchmark),
+  `balancing/settlement/system-prices/{date}` (imbalance / cash-out price), and
+  `MID` (Market Index Data — a within-day wholesale price used as a day-ahead proxy).
+  See `real_elexon_fuelhh_wide`, `real_elexon_system_price`, `real_elexon_mid` and
+  the assembler `real_context` in `data.py`. (Verify dataset field names on first
+  run — they drift occasionally.) Docs: https://developer.data.elexon.co.uk/
 - **PV Live** (Sheffield Solar): `pip install pvlive-api` -> national PV, 30-min.
   Scale to a site by capacity ratio. See `real_pvlive_national`.
 - **Octopus Agile**: real half-hourly retail prices (regional) if you want a retail

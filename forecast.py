@@ -82,9 +82,10 @@ def train_forecast(net: pd.Series, ctx: pd.DataFrame | None = None,
     Xcols = [c for c in feat.columns if c != "y"]
     Xtr, ytr, Xte, yte = tr[Xcols], tr["y"], te[Xcols], te["y"]
 
-    # point forecast
+    # point forecast (random_state fixed -> reproducible runs)
     point = GradientBoostingRegressor(n_estimators=200, max_depth=3,
-                                      learning_rate=0.05, subsample=0.8)
+                                      learning_rate=0.05, subsample=0.8,
+                                      random_state=0)
     point.fit(Xtr, ytr)
     p_hat = pd.Series(point.predict(Xte), index=te.index, name="point")
 
@@ -92,9 +93,17 @@ def train_forecast(net: pd.Series, ctx: pd.DataFrame | None = None,
     quants = {}
     for q in (0.1, 0.5, 0.9):
         m = GradientBoostingRegressor(loss="quantile", alpha=q, n_estimators=200,
-                                      max_depth=3, learning_rate=0.05, subsample=0.8)
+                                      max_depth=3, learning_rate=0.05, subsample=0.8,
+                                      random_state=0)
         m.fit(Xtr, ytr)
         quants[q] = pd.Series(m.predict(Xte), index=te.index)
+
+    # independently-fitted quantiles can cross; enforce q10 <= q50 <= q90 by
+    # sorting each row (monotone, coherent bands for downstream risk sizing).
+    qsorted = np.sort(np.column_stack([quants[0.1], quants[0.5], quants[0.9]]), axis=1)
+    quants[0.1] = pd.Series(qsorted[:, 0], index=te.index)
+    quants[0.5] = pd.Series(qsorted[:, 1], index=te.index)
+    quants[0.9] = pd.Series(qsorted[:, 2], index=te.index)
 
     naive = naive_baseline(net).reindex(te.index)
     metrics = {

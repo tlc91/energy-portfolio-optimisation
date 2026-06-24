@@ -43,6 +43,9 @@ def dispatch_lp(net_kw: pd.Series, price: pd.Series,
         prob += grid[t] == net[t] + c[t] - d[t]
         prev = soc0_frac * cap_kwh if t == 0 else soc[t - 1]
         prob += soc[t] == prev + (eff * c[t] - d[t] / eff) * 0.5   # 0.5h step
+    # terminal SoC >= initial: stops the LP draining the (free) starting charge
+    # by the horizon end, which would bias costs down and inflate battery value.
+    prob += soc[T - 1] >= soc0_frac * cap_kwh
     prob.solve(pulp.PULP_CBC_CMD(msg=0))
     res = pd.DataFrame({
         "net_kw": net,
