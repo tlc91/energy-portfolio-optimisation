@@ -175,8 +175,8 @@ def synth_generation_mix(days: int, seed: int = 20) -> pd.DataFrame:
     handled by a scarcity term in synth_price instead.
 
     Returns one wide DataFrame with one column per fuel plus a few derived
-    columns (renewables share, residual demand) that are convenient for both
-    the price model and the forecaster's features.
+    columns (variable-renewables share, residual demand) that are convenient
+    for both the price model and the forecaster's features.
     """
     demand = synth_national_demand(days, seed=seed)
     wind = synth_wind_national(days, seed=seed + 1)
@@ -196,10 +196,13 @@ def synth_generation_mix(days: int, seed: int = 20) -> pd.DataFrame:
         "biomass_mw": biomass, "hydro_mw": hydro, "solar_mw": solar,
         "interconnector_mw": interc, "ccgt_mw": ccgt,
     }, axis=1)
-    mix["renewables_mw"] = mix["wind_mw"] + mix["solar_mw"]
-    mix["renewables_share"] = (mix["renewables_mw"] / mix["demand_mw"]).clip(0, 2)
+    # Variable renewables (wind + solar): nuclear/biomass are low-carbon but
+    # not weather-driven, so they don't belong in the price-suppression term.
+    # Named vre_* (not renewables_*) per primer §9.2 #6.
+    mix["vre_mw"] = mix["wind_mw"] + mix["solar_mw"]
+    mix["vre_share"] = (mix["vre_mw"] / mix["demand_mw"]).clip(0, 2)
     mix["residual_demand_mw"] = (mix["demand_mw"]
-                                 - mix["renewables_mw"] - mix["nuclear_mw"]
+                                 - mix["vre_mw"] - mix["nuclear_mw"]
                                  - mix["biomass_mw"] - mix["hydro_mw"]
                                  - mix["interconnector_mw"])
     return mix
@@ -220,14 +223,14 @@ def synth_price(days: int, mix: pd.DataFrame | None = None, seed=2) -> pd.DataFr
     if mix is None:
         mix = synth_generation_mix(days, seed=seed + 1000)
     idx = mix.index
-    renew_share = mix["renewables_share"].values
+    vre_share = mix["vre_share"].values
     tightness = (mix["residual_demand_mw"].values / FLEX_GAS_REF_MW)  # 1 ≈ gas headroom
     # convex scarcity: kicks in as residual nears the gas-fleet headroom
     scarcity = 200 * np.clip(tightness - 0.85, 0.0, None)
     base = (75
             + 80 * np.clip(tightness, -1.0, 1.2)                     # tight -> up
             + scarcity                                               # scarcity -> spike
-            - 60 * np.clip(renew_share, 0, 1.5))                     # renewables -> down
+            - 60 * np.clip(vre_share, 0, 1.5))                       # VRE -> down
     day_ahead = base + rng.normal(0, 5, len(idx))
     day_ahead = np.clip(day_ahead, -75, 600)
     spread_scale = 10 + 30 * np.clip(tightness, 0, 1.2)
@@ -246,6 +249,10 @@ def build_portfolio(n_sites: int = 5, days: int = 14, seed: int = 0,
     feed the forecaster features — it is NOT added to the portfolio's physical
     net. Sites share a weather/cloud factor so forecast errors don't fully
     cancel (the whole point of portfolio-level modelling).
+
+    Per-site frames carry both the SP-averaged powers in kW (load_kw, solar_kw)
+    and the per-SP energies in MWh (load_mwh, solar_mwh = *_kw · Δt / 1000)
+    so downstream code can pick the unit its layer is written in — see primer §1.
 
     Data source:
       * real=False (default): everything synthetic, runs anywhere.
@@ -281,7 +288,13 @@ def build_portfolio(n_sites: int = 5, days: int = 14, seed: int = 0,
         # sites are built on the SAME index as the context (synthetic or real)
         solar = synth_solar(capacity_kw=cap, seed=seed + s, index=idx, cloud=cloud)
         load = synth_site_load(base_kw=base, seed=seed + 50 + s, index=idx)
-        sites[f"site_{s}"] = pd.DataFrame({"solar_kw": solar, "load_kw": load})
+        sites[f"site_{s}"] = pd.DataFrame({
+            "solar_kw": solar, "load_kw": load,
+            # MWh per SP — the energy form everything downstream of the meter
+            # (contracts, settlement, forecasting) speaks (primer §1).
+            "solar_mwh": solar * 0.5 / 1000.0,
+            "load_mwh": load * 0.5 / 1000.0,
+        })
     return {"sites": sites, "price": price, "mix": mix, "index": idx}
 
 
@@ -425,9 +438,9 @@ def real_context(date_from: str, date_to: str) -> dict:
     mix["solar_mw"] = fuel("SOLAR")
     mix["interconnector_mw"] = interc
     mix["ccgt_mw"] = fuel("CCGT") + fuel("OCGT")     # all dispatchable gas
-    mix["renewables_mw"] = mix["wind_mw"] + mix["solar_mw"]
-    mix["renewables_share"] = (mix["renewables_mw"] / mix["demand_mw"]).clip(0, 2)
-    mix["residual_demand_mw"] = (mix["demand_mw"] - mix["renewables_mw"]
+    mix["vre_mw"] = mix["wind_mw"] + mix["solar_mw"]
+    mix["vre_share"] = (mix["vre_mw"] / mix["demand_mw"]).clip(0, 2)
+    mix["residual_demand_mw"] = (mix["demand_mw"] - mix["vre_mw"]
                                  - mix["nuclear_mw"] - mix["biomass_mw"]
                                  - mix["hydro_mw"] - mix["interconnector_mw"])
 
@@ -445,5 +458,5 @@ if __name__ == "__main__":
     print(p["price"].describe().round(1).to_string())
     print("\nGB generation mix MW — describe (cols subset):")
     cols = ["demand_mw", "wind_mw", "nuclear_mw", "ccgt_mw",
-            "solar_mw", "renewables_share", "residual_demand_mw"]
+            "solar_mw", "vre_share", "residual_demand_mw"]
     print(p["mix"][cols].describe().round(1).to_string())
