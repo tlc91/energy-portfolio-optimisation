@@ -6,7 +6,7 @@ Two modes:
     national generation mix, all generated from documented patterns.
   - REAL (run locally): pulls genuine half-hourly data from public, key-free APIs.
 
-Modelling distinction — important, kept explicit in the code:
+Modelling distinction — important, kept explicit in the code (primer §3):
   * PORTFOLIO  = a C&I site's grid-facing net = (site load) - (site rooftop solar).
                  Self-supply on the customer side is SOLAR ONLY (plus battery storage
                  from loop.py). This is what we forecast / hedge / dispatch.
@@ -14,9 +14,13 @@ Modelling distinction — important, kept explicit in the code:
                  hydro, interconnectors, solar; GB is coal-free since 30 Sep 2024).
                  The customer does not own any of
                  these other than rooftop solar; they enter the prototype only as
-                 PRICE-FORMATION CONTEXT (drive wholesale + imbalance prices) and
-                 as features for the forecaster. NEVER add national wind/nuclear/etc
-                 to the portfolio net.
+                 PRICE-FORMATION CONTEXT (drive wholesale + imbalance prices, see
+                 primer §2.3 merit-order reduced form) and as features for the
+                 forecaster. NEVER add national wind/nuclear/etc to the portfolio net.
+
+Non-commodity charges (TNUoS, DUoS, BSUoS, RO, CfD, CM, CCL) are out of scope of
+this prototype — see primer §2.5 for the full stack and why a real C&I bill is
+~60% non-commodity. The price columns here are wholesale + cash-out only.
 """
 from __future__ import annotations
 import numpy as np
@@ -50,7 +54,12 @@ def synth_solar(days: int | None = None, capacity_kw: float = 250.0, seed=0,
     Pass ``index`` to generate on an explicit (e.g. real-data) datetime index.
     Pass ``cloud`` (an array in [0,1], same length as the index) to impose an
     external cloud-attenuation factor — build_portfolio uses this to share
-    weather across sites. If None, an independent beta(6,2) cloud is drawn."""
+    weather across sites. If None, an independent beta(6,2) cloud is drawn.
+
+    Implements primer §4.5's decomposition implicitly: ``seasonal × bell`` is
+    the clear-sky envelope GHI_clear(s)·η_PV·A; ``cloud`` is the clear-sky
+    index k(s). A production pipeline would forecast k_t directly (it is
+    stationary across sites/seasons) and rebuild PV output from it."""
     rng = np.random.default_rng(seed)
     idx = _hh_index(days) if index is None else index
     hh = idx.hour + idx.minute / 60.0
@@ -198,7 +207,10 @@ def synth_generation_mix(days: int, seed: int = 20) -> pd.DataFrame:
     }, axis=1)
     # Variable renewables (wind + solar): nuclear/biomass are low-carbon but
     # not weather-driven, so they don't belong in the price-suppression term.
-    # Named vre_* (not renewables_*) per primer §9.2 #6.
+    # Named vre_* (not renewables_*) per primer §9.2 #6. This is also the
+    # *cannibalisation channel* of primer §5.5: when vre_share rises, the
+    # capture price of any renewable PPA falls — the same series prices both
+    # the wholesale market (§2.3) and a hypothetical PPA's MtM (§5.5).
     mix["vre_mw"] = mix["wind_mw"] + mix["solar_mw"]
     mix["vre_share"] = (mix["vre_mw"] / mix["demand_mw"]).clip(0, 2)
     mix["residual_demand_mw"] = (mix["demand_mw"]
@@ -211,13 +223,15 @@ def synth_generation_mix(days: int, seed: int = 20) -> pd.DataFrame:
 
 def synth_price(days: int, mix: pd.DataFrame | None = None, seed=2) -> pd.DataFrame:
     """Half-hourly prices (GBP/MWh): a day-ahead reference and a fatter-tailed
-    imbalance / cash-out price.
+    imbalance / cash-out price. Implements primer §2.3 reduced form and §2.4
+    cash-out asymmetry (tightness-scaled spread).
 
     Merit-order flavour: CCGT-marginal base, pulled DOWN by renewables share
     and pushed UP by system tightness, with a convex scarcity adder when the
     residual nears the gas-fleet headroom (the stack leaning on pricey peaking
     gas / imports — this replaces the old coal-on spike, GB now being coal-free).
-    Imbalance = day-ahead + a Student-t spread whose scale grows with tightness.
+    Imbalance = day-ahead + a Student-t spread whose scale grows with tightness
+    (the symmetry of which is a known simplification — see primer §9.2 #4).
     """
     rng = np.random.default_rng(seed)
     if mix is None:

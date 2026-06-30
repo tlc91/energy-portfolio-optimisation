@@ -4,6 +4,11 @@ A minimal, runnable version of the **forecast → dispatch → settle → PnL** 
 small commercial & industrial solar+battery portfolio. Built to grow understanding,
 not to be production code.
 
+For the conceptual and mathematical foundation — market structure, leakage discipline,
+the cost decomposition, the LP/MIP boundary, the A/B/C economic identities, and a
+critical review of the code — see [`docs/energy_portfolio_primer.md`](docs/energy_portfolio_primer.md).
+The `§` references scattered through the source code point to its sections.
+
 ## Portfolio vs system — the modelling distinction
 
 Two things are modelled and they are **not the same thing**:
@@ -16,6 +21,44 @@ Two things are modelled and they are **not the same thing**:
   biomass, hydro, interconnectors, national solar). This enters the prototype only
   as **price-formation context**: it drives wholesale + imbalance prices and feeds
   the forecaster as features. National wind is *never* added to the portfolio net.
+
+## Decision layers — what this prototype covers (and what it doesn't)
+
+A C&I customer's energy problem is layered by **horizon**: long-horizon decisions
+*set the position*, short-horizon decisions *defend it*. The prototype focuses on
+the short end; the long end is on the roadmap. Three horizons in practice:
+
+| Horizon | Decision | What it produces | Status in this repo |
+|---|---|---|---|
+| **Procurement / hedging** (months → years) | how much of forecast volume to **fix** vs leave on **float**, at what **tenor**, via what **product** | the contract stack | not implemented — see roadmap #5 (newsvendor / CVaR), primer §5 |
+| **PPA structuring** (one PPA's life, 10–20 yr) | fair strike £/MWh, shape factor, hedging of basis | a defensible price for one specific PPA before it enters the stack | out of scope (the C&I buyer typically consumes Layer B's output as a quoted price) |
+| **Dispatch + short-term trading** (day-ahead → real-time) | battery charge/discharge schedule and day-ahead trade volume | the loop you see in `loop.svg` | **implemented**: `forecast.py` + `loop.py::dispatch_lp` + `settle` |
+
+> **Naming gotcha.** The **A/B/C** labels in the *"key idea"* section below refer to
+> three *strategies* compared inside the dispatch layer (perfect-foresight, forecast,
+> no-battery) — they are *not* the three decision layers above.
+
+### Procurement vocabulary (quick reference; the primer is authoritative)
+
+- **Fix vs float** — fix the price now via a forward contract, or leave the volume
+  exposed to the spot price.
+- **Tenor** — the contract's covered period: `M+1` (next month), `Q+1` (next
+  quarter), `Season` (Summer = Apr–Sep, Winter = Oct–Mar), `Cal` (calendar year,
+  e.g. `Cal-27`).
+- **Layering / clicks** — fix a target % over time (e.g. 10%/month for 6 months
+  until 60% hedged) instead of a single trade.
+- **Flexible block** — fixed-price forward for a flat MW shape (baseload or peak).
+  Liquid, simple, doesn't match real load shape — residual hits spot/cash-out.
+- **PPA (Power Purchase Agreement)** — long-term contract directly with a generator;
+  today almost always a renewable (corporate / virtual PPA). Brings **shape risk**
+  (their output ≠ your demand) and **cannibalisation** (capture-price erosion as
+  renewable penetration grows) into the model.
+- **Index** — pay the actual wholesale price as it settles; no hedge.
+
+A typical C&I hedge stack mixes all four: e.g. *60% Cal-27 baseload block bought
+in monthly clicks, 20% via a solar vPPA signed last year, 10% Q+1 winter peak
+blocks, 10% left on index.* Optimising that stack — under price + volume
+uncertainty, with a tail-risk constraint — is the **procurement** layer above.
 
 ## The loop (what each file does)
 

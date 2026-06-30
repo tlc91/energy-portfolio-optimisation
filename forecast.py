@@ -49,12 +49,13 @@ def ctx_from_portfolio(p) -> pd.DataFrame:
     resid_demand_lag, nat_wind_lag, nat_solar_lag in MW (national mix scale —
     these are predictors of price, not of the customer's MWh per SP net).
 
-    Leakage rules applied here:
+    Leakage rules applied here (primer §4.1, "knowable at decision time"):
       - day_ahead price: cleared the day before delivery -> available as a
         same-period feature.
       - imbalance price: only settled after the fact -> lag(1) only.
       - mix state (VRE share, residual demand): a real model would use
-        a system forecast; here we use lag(1) of the actual as a stand-in.
+        a system forecast; here we use lag(1) of the actual as a stand-in
+        (an honest placeholder, primer §9.2 #7).
     """
     mix, price = p["mix"], p["price"]
     return pd.DataFrame({
@@ -84,10 +85,14 @@ def make_features(net: pd.Series, ctx: pd.DataFrame | None = None) -> pd.DataFra
     return df.dropna()
 
 def naive_baseline(net: pd.Series) -> pd.Series:
-    """Yesterday's same settlement period."""
+    """Yesterday's same settlement period — the persistence baseline of primer §4.4.
+    Cheap, surprisingly strong intraday; "beat the baseline" is the operational test."""
     return net.shift(HH).rename("naive")
 
 def pinball(y, q_pred, q):
+    """Quantile (pinball) loss — primer §4.3 / Koenker & Bassett 1978.
+    Minimising E[ρ_q(y, ŷ)] yields the true conditional q-quantile;
+    averaging across quantiles approximates CRPS, a proper scoring rule."""
     d = y - q_pred
     return np.mean(np.maximum(q * d, (q - 1) * d))
 

@@ -21,10 +21,24 @@ clearly what it simplifies, and (c) plan rigorous extensions. It closes with a c
 review of the prototype, including several concrete logic issues, and a research roadmap.
 
 We use the convention throughout that **cost is positive** (money leaving the customer) and
-**revenue is negative**. Energy quantities are in kilowatt-hours (**kWh**) or megawatt-hours
-(**MWh**); power in **kW**/**MW**; prices in pounds per MWh (**£/MWh**). One GB
-**settlement period** (**SP**) is 30 minutes, so there are 48 per day and power $p$ kW
-sustained over one SP delivers $0.5p/1000$ MWh.
+**revenue is negative**. Prices are in pounds per MWh (**£/MWh**). One GB **settlement
+period** (**SP**) is 30 minutes, so there are 48 per day.
+
+**Energies vs powers — and why we keep them separate.** Settlement, contracts, and the
+conservation law that ties them together are statements about **energy** integrated over
+the SP. We therefore write every per-SP volume — net position $n_t$, contracts $q^x_t$,
+metered outturn, imbalance $\Delta_t$ — in **MWh per SP** unless explicitly marked as a
+power. Instantaneous physical signals (load and solar metered traces, battery rate limits,
+the LP's charge/discharge decision variables) are naturally **powers** in kW or MW; we
+convert via $E = P \cdot \Delta t$ where $\Delta t = 0.5$ h is the current SP length.
+
+The reason for the discipline is that **the energy formulation is invariant under changes
+of $\Delta t$** — the EU's 15-minute imbalance settlement period (ISP) reform, the
+aggregation of many SPs into a forward block, or any future sub-half-hour ancillary product
+— whereas the power formulation requires rescaling every $\Delta t$ that appears. The
+prototype code carries some signals in kW for implementation convenience (load curves,
+battery rates); this paper labels each quantity with its dimension so a reader can audit
+the unit story without having to trust that everything has the same $\Delta t$.
 
 ---
 
@@ -33,14 +47,16 @@ sustained over one SP delivers $0.5p/1000$ MWh.
 Let the portfolio's **grid-facing net position** in settlement period $t$ be
 
 $$
-n_t \;=\; \underbrace{L_t}_{\text{site load}} \;-\; \underbrace{S_t}_{\text{on-site solar}} \quad [\text{kW}],
+n_t \;=\; \underbrace{L_t}_{\text{site load}} \;-\; \underbrace{S_t}_{\text{on-site solar}} \quad [\text{MWh per SP}],
 $$
 
-aggregated over all sites in the portfolio. When $n_t>0$ the portfolio is a net *importer*
-(it must buy energy); when $n_t<0$ it is a net *exporter*. This single quantity — **not**
-load and generation separately — is what is hedged, forecast, and dispatched against.
-On-site solar is the *only* self-supply on the customer side; a battery adds **temporal
-shifting** of that net but creates no new energy.
+aggregated over all sites in the portfolio. $L_t$ and $S_t$ are the **energies** consumed
+and generated in SP $t$ — the integrals of the instantaneous load and solar powers $P^L,
+P^S$ over the half-hour. Meters report the underlying power trace; settlement and contracts
+care only about its integral $n_t$, which is the quantity hedged, forecast, and dispatched
+against. When $n_t>0$ the portfolio is a net *importer*; when $n_t<0$ it is a net
+*exporter*. On-site solar is the *only* self-supply on the customer side; a battery adds
+**temporal shifting** of that net but creates no new energy.
 
 The customer's total cost over a horizon $\mathcal{T}$, decomposed by the decision layer that
 incurs it, is
@@ -49,12 +65,52 @@ $$
 \boxed{\;C \;=\; \underbrace{C_{\text{fwd}}}_{\text{forward/hedge}} \;+\; \underbrace{C_{\text{DA}}}_{\text{day-ahead}} \;+\; \underbrace{C_{\text{ID}}}_{\text{within-day}} \;+\; \underbrace{C_{\text{imb}}}_{\text{imbalance / cash-out}} \;+\; \underbrace{C_{\text{non-comm}}}_{\text{networks, levies, capacity}}\;}
 $$
 
-Every term but the last is a *trading* decision taken under uncertainty about $n_t$ and
-about prices. The art is that **each term is decided at a different time, against a
-different forecast**, and the residual uncertainty cascades down to the cash-out term, which
-is the most expensive and least controllable. The entire economic case for a forecasting and
-optimisation function is: *push risk up the timeline, where it is cheap to manage, and out of
-the cash-out term, where it is dear.*
+**Each commodity term has the same shape — price × energy — at its own decision layer.**
+With prices in [£/MWh] and contracted/imbalance energies in [MWh], each cost in £ is just
+the dot product of the two:
+
+$$
+\begin{aligned}
+C_{\text{fwd}} &= \sum_{B\in\mathcal{B}} \pi^{\text{fwd}}_B \cdot E^{\text{fwd}}_B && [\pounds] \\
+C_{\text{DA}}  &= \sum_t \pi^{\text{DA}}_t  \cdot q^{\text{DA}}_t  && [\pounds] \\
+C_{\text{ID}}  &= \sum_t \pi^{\text{ID}}_t  \cdot q^{\text{ID}}_t  && [\pounds] \\
+C_{\text{imb}} &= \sum_t \pi^{\text{imb}}_t \cdot \Delta_t          && [\pounds]
+\end{aligned}
+$$
+
+where:
+
+- $\pi^x_t$ — clearing price in market $x$ for SP $t$ [£/MWh];
+- $q^x_t$ — **energy** bought ($q>0$) or sold ($q<0$) at layer $x$ for SP $t$ [MWh]. No $\Delta t$ factor appears — that is the point of carrying contracts as energies in the first place;
+- $E^{\text{fwd}}_B$ — total energy of forward **block** $B$ [MWh]. Blocks (months, quarters, seasons) are quoted as a flat **power** $P^{\text{fwd}}_B$ [MW] held over the block's covered SPs (every SP for baseload, peak SPs only for peak blocks); the contracted energy is $E^{\text{fwd}}_B = P^{\text{fwd}}_B \cdot H_B$ with $H_B$ the block's covered duration in hours;
+- $\pi^{\text{ID}}_t$ in $C_{\text{ID}}$ is a volume-weighted average of the continuous-market trades that settled into SP $t$ (the intraday market clears continuously up to gate closure, not at a single auction);
+- $\Delta_t = q^{\text{actual}}_t - q^{\text{contract}}_t$ [MWh] is the **imbalance energy** — the residual after every prior layer (defined formally in §2.4).
+
+The energies physically clear at every SP — this is a conservation law:
+
+$$
+\underbrace{q^{\text{fwd}}_t + q^{\text{DA}}_t + q^{\text{ID}}_t}_{q^{\text{contract}}_t} \;+\; \Delta_t \;=\; q^{\text{actual}}_t \;=\; n_t \quad [\text{MWh per SP}],
+$$
+
+i.e. **every MWh consumed in SP $t$ came from *some* layer**, and whatever prior trading
+didn't cover is closed by the imbalance residual. **This is why $C_{\text{imb}}$ is the
+residual term: it prices the energy your forecasts and trades failed to secure earlier.**
+The identity is fundamentally an *energy* balance; the prototype's code happens to carry
+the same equation in kW (SP-averaged power), which is equivalent only because every term on
+every line has the same $\Delta t$. The equivalence breaks the moment time grids differ —
+forward blocks span thousands of SPs, intraday is moving toward 15 min, ancillary services
+already run on sub-second windows — which is why the doc writes it in energy.
+
+The final $C_{\text{non-comm}}$ — networks, levies, capacity — is the regulated charge
+stack (§2.5) and is not a price × traded-energy term in the same sense; it depends on
+metered consumption against published tariffs.
+
+Every commodity term but the last is a *trading* decision taken under uncertainty about
+$n_t$ and about prices. The art is that **each term is decided at a different time, against
+a different forecast**, and the residual uncertainty cascades down to the cash-out term,
+which is the most expensive and least controllable. The entire economic case for a
+forecasting and optimisation function is: *push risk up the timeline, where it is cheap to
+manage, and out of the cash-out term, where it is dear.*
 
 ---
 
@@ -123,10 +179,44 @@ stack, the marginal unit is usually a gas plant (**CCGT** — Combined Cycle Gas
 useful reduced-form is
 
 $$
-\pi^{\text{DA}}_t \;\approx\; \underbrace{\text{SRMC}^{\text{CCGT}}_t}_{\text{fuel}\,/\,\eta\,+\,\text{carbon}} \;+\; \beta_{\text{tight}}\,\text{tightness}_t \;-\; \beta_{\text{ren}}\,\text{renewables-share}_t \;+\; \varepsilon_t,
+\pi^{\text{DA}}_t \;\approx\; \underbrace{\text{SRMC}^{\text{CCGT}}_t}_{\text{fuel}\,/\,\eta_{\text{th}}\,+\,\text{carbon}} \;+\; \beta_{\text{tight}}\,\text{tightness}_t \;-\; \beta_{\text{ren}}\,\text{renewables-share}_t \;+\; \varepsilon_t,
 $$
 
-where **SRMC** is short-run marginal cost. The two structural levers are visible directly:
+where, term by term:
+
+- $\pi^{\text{DA}}_t$ — the **day-ahead wholesale clearing price** in SP $t$ (£/MWh); the prototype's `day_ahead` series and the reference "spot" price most analyses use.
+- $\text{SRMC}^{\text{CCGT}}_t$ — the **short-run marginal cost** of the marginal CCGT unit, decomposed in the underbrace as:
+  - $\text{fuel}/\eta_{\text{th}}$ — the gas spot price (£/MWh of *gas*) divided by the plant's **thermal efficiency** $\eta_{\text{th}}$ (typically $\approx 0.5$–$0.6$ for a modern CCGT), giving £ per MWh of *electricity*. The division reflects that you must burn more than 1 MWh of gas to get 1 MWh of power out. (This $\eta_{\text{th}}$ is unrelated to the battery round-trip efficiency $\eta$ in §6.)
+  - $\text{carbon}$ — the **carbon cost** per MWh of electricity = UK/EU ETS allowance price (£/tCO₂) × the plant's emissions intensity (tCO₂/MWh, $\approx 0.35$ for CCGT).
+- $\text{tightness}_t$ — **residual demand relative to available flexible capacity** (dimensionless; the prototype normalises residual demand by `FLEX_GAS_REF_MW`, so $\text{tightness} \approx 1$ means the system is running tight).
+- $\text{renewables-share}_t = (\text{wind}_t + \text{solar}_t)/\text{demand}_t$ — the share of demand met by variable renewables.
+- $\beta_{\text{tight}}, \beta_{\text{ren}} > 0$ — reduced-form sensitivities **[£/MWh]** (since tightness and renewables-share are dimensionless ratios, the betas carry the same units as price). They quantify how many £/MWh of price-lift a one-unit increase in tightness adds, and how many £/MWh a one-unit increase in renewables share takes away. Estimated empirically (e.g. by regression on historical Elexon data).
+- $\varepsilon_t$ — a mean-zero residual capturing everything the reduced form omits: unit outages, gas-price shocks, intraday demand surprises, balancing actions feeding back into prompt prices, and pure sentiment.
+
+A stylised picture of the stack ordered cheapest → costliest makes the levers
+visible at a glance:
+
+```
+£/MWh ↑
+      │                                                ┌─ peaking / imports ─┐
+      │                                                │   (£200+, scarcity)  │
+      │                              ┌──── CCGT ──────┤                      │
+      │                              │   (£75–110)    │                      │
+      │            ┌── biomass ─────┤                 │                      │
+      │            │   + hydro       │                 │                      │
+      │   ┌── nuclear (baseload) ───┤                 │                      │
+      │   │                          │                 │                      │
+      │   │  wind + solar (≈ £0)     │                 │                      │
+      └───┴──────────────────────────┴─────────────────┴──────────────────────┴─► MW cumulative
+          ↑                          ↑                 ↑                      ↑
+        windy night             normal afternoon  cool evening          winter peak
+        clears in VRE           clears in CCGT    clears in CCGT        clears in peaking
+        (≤ £0 possible)         (≈ £80)           (≈ £100)              (≥ £200, scarcity)
+```
+
+Stack blocks ordered low-to-high SRMC, width ∝ available MW. The system clears
+at the £/MWh of the most expensive block needed; the demand intercept slides
+right as the system tightens. The two structural levers are visible directly:
 
 - **Renewables share** $r_t = (\text{wind}_t+\text{solar}_t)/\text{demand}_t$ pushes price
   *down* — a windy, sunny half-hour can clear at or below zero (negative prices occur when it
@@ -137,19 +227,80 @@ where **SRMC** is short-run marginal cost. The two structural levers are visible
   closed on **30 September 2024**; the marginal unit is now almost always gas. The prototype
   reflects this — it carries no coal stack and models peak spikes via a convex scarcity term.)
 
-This is exactly the structure the prototype's `synth_price` encodes (§9). The key intuition
-for a portfolio manager: **price and your own net position are both driven by weather and
-demand**, so they are *correlated*, and that correlation is where both risk and opportunity
-live (you are most likely to be short exactly when the system is tight and prices spike).
+This is exactly the structure the prototype's `synth_price` (in `data.py`)
+encodes — CCGT-marginal base, VRE-share suppression, convex scarcity adder near
+the flexible-gas headroom; see §9 for caveats. The key intuition for a portfolio
+manager: **price and your own net position are both driven by weather and
+demand**, so they are *correlated*, and that correlation is where both risk and
+opportunity live (you are most likely to be short exactly when the system is
+tight and prices spike).
+
+### 2.3.1 Intraday: same fundamentals, refreshed information
+
+The intraday (ID) market trades the same physical commodity as DA — same merit
+order (§2.3), same marginal CCGT, same VRE supply, same demand. So ID is
+**anchored to DA** and decomposes into a reduced form of the same shape, plus
+two ID-specific terms:
+
+$$
+\pi^{\text{ID}}_t \;\approx\; \pi^{\text{DA}}_t \;+\;
+\underbrace{\beta_r\,\Delta r_t \;+\; \beta_T\,\Delta\text{tightness}_t \;+\; \beta_O\,\Delta\text{outages}_t}_{\text{news between DA gate closure and ID trade time}}
+\;+\; \underbrace{\beta_L\,\text{gate-closure pressure}_t}_{\text{liquidity / forced flow}}
+\;+\; \varepsilon^{\text{ID}}_t,
+$$
+
+where the $\Delta$ terms are the **revisions** in expected VRE share, system
+tightness and unit outages between DA gate closure (~noon the previous day)
+and the time of the ID trade. Three structural differences from DA matter for
+the modeller:
+
+1. **Continuous market, not an auction.** Trades clear bilaterally over time
+   right up to **gate closure** (T-1h in GB). What we call "the ID price for
+   SP $t$" is a *volume-weighted average* of trades that settled into that SP,
+   not a single clearing — exactly the form §1 already writes.
+2. **Updated information set.** ID prices incorporate later NWP runs, fresher
+   demand actuals, real-time outage news, and BM signals leaking back into
+   prompt prices. ID is sharper than DA on the same fundamentals.
+3. **Liquidity asymmetry near gate closure.** Order books thin as gate
+   approaches; parties with mismatched positions become forced sellers/buyers,
+   creating one-sided flow that can dislocate ID from fundamentals briefly.
+   This is the $\beta_L$ term above, and has no analogue in DA.
+
+Empirically, the ID-DA spread mean-reverts to ~0 on long samples (no consistent
+arbitrage), but has substantial variance — particularly in stressed periods,
+where forecast revisions move ID materially. The dominant predictor of the
+spread is the **forecast revision** itself: if NWP at H-6 raises expected wind
+by 4 GW relative to DA, ID prices compress vs DA in roughly that direction.
+
+**The economic role of ID, in one sentence.** ID is where you trade off the
+*update* to your forecast against the *committed* DA position: you bought DA
+assuming forecast $\hat n^{\text{DA}}$, intervening news refines it to
+$\hat n^{\text{ID}}$, and you re-trade $(\hat n^{\text{ID}} - \hat n^{\text{DA}})$
+in ID — paying $\pi^{\text{ID}}_t$ — to shrink the residual that would otherwise
+flow to the (more expensive) imbalance settlement at cash-out. This is the
+"push risk up the timeline" idea of §1 applied at finer granularity: ID is to
+DA what gate closure is to imbalance.
+
+The prototype does not model ID — it trades DA-to-forecast and lets the rest
+flow to imbalance (§7.1). Adding an ID layer is a natural extension once
+intraday re-forecasting (roadmap #4, §6.3 MPC) is in place: the ID layer
+*consumes* the re-forecast and *defends* the DA position against it.
 
 ### 2.4 Cash-out (the imbalance price): the term that disciplines everything
 
-Let a party's final notified (contracted) position in SP $t$ be $q^{\text{contract}}_t$ and
-its metered outturn $q^{\text{actual}}_t$. Its **imbalance volume** is
+Let a party's final notified (contracted) position in SP $t$ be $q^{\text{contract}}_t$
+**[MWh per SP]** and its metered outturn $q^{\text{actual}}_t$ **[MWh per SP]** — both are
+*energies*, integrals of the corresponding instantaneous powers over the half-hour, exactly
+as real BSC settlement files report them. Its **imbalance energy** is
 
 $$
-\Delta_t \;=\; q^{\text{actual}}_t - q^{\text{contract}}_t .
+\Delta_t \;=\; q^{\text{actual}}_t - q^{\text{contract}}_t \quad [\text{MWh per SP}].
 $$
+
+(The prototype's code carries the same identity in kW (SP-averaged power) for
+implementation convenience; that is equivalent only under uniform $\Delta t = 0.5$ h, and
+the doc keeps energy as the primary unit so the formulas survive a future change in SP
+length — see the abstract.)
 
 Under the GB **single imbalance price** regime (introduced through BSC modification **P305**,
 phased in from 2015), *both* directions settle at one price $\pi^{\text{imb}}_t$ per SP — you
@@ -160,11 +311,14 @@ reflect genuinely marginal actions), plus reserve-scarcity adders. The settlemen
 to the customer is
 
 $$
-C^{\text{imb}}_t \;=\; -\,\Delta_t \,\pi^{\text{imb}}_t \cdot \tfrac{1}{2}\big/1000 \quad [\pounds],
+C^{\text{imb}}_t \;=\; -\,\Delta_t \,\pi^{\text{imb}}_t \quad [\pounds],
 $$
 
-with the sign convention that being short ($\Delta_t<0$, used less or generated more than
-contracted) and being long are penalised/rewarded symmetrically *at that period's price*.
+i.e. imbalance energy [MWh] × cash-out price [£/MWh] gives £ directly, with no conversion
+factor because $\Delta_t$ is already an energy. Summing over $t$ recovers the
+$C_{\text{imb}}$ of §1. The sign convention is that being short ($\Delta_t<0$, used less or
+generated more than contracted) and being long are penalised/rewarded symmetrically *at
+that period's price*.
 
 Two facts matter for strategy:
 
@@ -182,23 +336,132 @@ Two facts matter for strategy:
 
 ### 2.5 The non-commodity stack (why C&I is special)
 
-A C&I bill is *not* just energy. A large fraction is **non-commodity** charges that a real
-portfolio optimiser also targets:
+A delivered C&I price in 2025/26 is roughly **40% commodity + 60% non-commodity**; the
+latter is a stack of regulated and policy-driven charges that a real portfolio optimiser
+also targets — and that the prototype does *not* model. The components below collectively
+explain why a C&I energy function spends more time on tariffs and timing than on wholesale
+trading.
 
-- **TNUoS / DUoS** — Transmission and Distribution Network Use of System charges. DUoS has
-  time-banded ("red/amber/green") unit rates; shifting load out of the red band is real money.
-- **Triad** (historical) — TNUoS demand charges were once levied on a site's demand during
-  the three highest national-demand half-hours each winter; "Triad avoidance" was a major
-  battery/flexibility use case until **Ofgem's Targeted Charging Review** largely removed the
-  benefit for demand from April 2023. Mentioned because much existing literature assumes it.
-- **Capacity Market (CM)**, **BSUoS** (Balancing Services Use of System, now largely fixed
-  and socialised to demand), and policy levies (RO, CfD, FiT).
-- **Ancillary / flexibility revenues** — frequency response products (e.g. Dynamic
-  Containment) and BM participation, which a battery can "stack" on top of arbitrage.
+#### 2.5.1 Network use of system (regional, time-banded)
 
-The prototype models *only* wholesale arbitrage + imbalance. That is the right first cut, but
-**value stacking is where a real C&I battery earns its keep**, and it is the largest gap
-between this model and reality (see roadmap, §10).
+- **TNUoS** — **T**ransmission **N**etwork **U**se of **S**ystem. Recovers the cost of the
+  GB transmission grid. After the **Targeted Charging Review** (April 2023) the demand
+  side has two parts:
+  - **Locational demand tariff** in **£/kW** of agreed peak capacity, levied annually
+    across 14 GSP zones. Northern Scotland sits near or below zero (a *credit*, reflecting
+    that southward flows are expensive); the South West is highest. The spread is on the
+    order of **£40–£50/kW/yr** between extremes — a 1 MW peak-coincident site sees that
+    much annual difference between siting in Glasgow vs Exeter.
+  - **Demand residual** — a fixed standing charge banded by capacity. Total residual
+    recovery rose ~60% between 2025/26 and 2026/27 (~£3.8bn → ~£6.4bn).
+- **Triad** (historical). Until **April 2023**, the TNUoS demand element was levied on a
+  site's three highest national-demand half-hours each winter. "Triad avoidance" was *the*
+  C&I flexibility use case for a decade. The TCR replaced it with the fixed
+  capacity-based charges above; most pre-2023 literature about C&I storage value still
+  assumes Triad exists.
+- **DUoS** — **D**istribution **N**etwork **U**se of **S**ystem. Recovers the cost of the
+  local distribution network across 14 DNO regions. Two components:
+  - **Time-banded unit rate** in p/kWh: **Red / Amber / Green**. Red typically covers
+    weekday 16:00–19:00 in winter and is **5–25 p/kWh** depending on region — *several
+    times* the Green rate. Shifting load out of Red is the single largest behind-the-meter
+    optimisation lever the prototype's `dispatch_lp` could be extended to target.
+  - **Capacity charge** in p/kVA/day on Agreed Supply Capacity (**ASC**), restructured
+    under Ofgem's **Access SCR** in April 2025: standing charges fell sharply, capacity
+    charges roughly doubled. **Right-sizing ASC** is now a procurement decision in its
+    own right — over-sized ASC bleeds £/yr regardless of consumption.
+
+#### 2.5.2 Balancing and capacity (national, fixed-ahead)
+
+- **BSUoS** — **B**alancing **S**ervices **U**se of **S**ystem. Recovers NESO's balancing
+  cost. Reformed in 2023: now levied as a *fixed-ahead* £/MWh on demand only (suppliers
+  fully pass through), removing the previous hedge-able intraday volatility. Typical
+  magnitude **£12–14/MWh** in 2026/27.
+- **Capacity Market (CM)**. Pays generators and Demand-Side Response providers a fixed
+  £/kW/yr to be available at peak. Auctions run **T-4** (four years ahead, the main
+  auction) and **T-1** (one year ahead, a top-up). The cost is recovered from suppliers
+  on a £/MWh-equivalent basis (the "smeared" unit rate), expected to exceed **£10/MWh**
+  in winter 2025/26. A flexible C&I site can *receive* CM revenue by derating its load
+  during the peak window — a value-stack the prototype does not model.
+
+#### 2.5.3 Policy levies (national, flat pass-through)
+
+- **RO** (**R**enewables **O**bligation; closed to new generation 2017 but recovery runs
+  until 2037) — ~**3.28 p/kWh** in 2025/26.
+- **CfD** (**C**ontracts for **D**ifference). The LCCC levies a top-up cost on suppliers
+  to fund CfD generators; ~**£10/MWh** in early 2026.
+- **FiT** (**F**eed-in **T**ariff; closed scheme). Recovered nationally; ~**1.0 p/kWh**.
+  CPI-indexed from April 2026 (previously RPI).
+- **CCL** (**C**limate **C**hange **L**evy) — **0.775 p/kWh** on electricity for business
+  consumers; lower for holders of a **CCA** (Climate Change Agreement, voluntary
+  energy-intensity commitment).
+
+#### 2.5.4 Reference magnitudes (2025/26 illustrative)
+
+| Component | Typical magnitude | Regional? | Time-of-day? |
+|---|---|---|---|
+| TNUoS locational demand | £0 – £50/kW/yr of peak capacity | yes (14 GSP zones) | annual fixed |
+| TNUoS demand residual | £/site/day, banded by ASC | mild | annual fixed |
+| DUoS unit rate (Red/Amber/Green) | 0.1 – 25 p/kWh | yes (14 DNOs) | yes (half-hourly) |
+| DUoS capacity | 5 – 25 p/kVA/day on ASC | yes | flat |
+| BSUoS | ~£12–14/MWh | no | fixed ahead |
+| Capacity Market (smeared) | ~£10/MWh | no | flat |
+| RO | ~3.28 p/kWh | no | annual |
+| CfD (interim levy) | ~£10/MWh | no | fluctuates |
+| FiT | ~1.0 p/kWh | no | annual |
+| CCL | 0.775 p/kWh | no | annual |
+
+These are order-of-magnitude figures for the modelling intuition this primer is meant to
+build; production work pulls the live NESO TNUoS statements and DNO LC14 statements. The
+takeaway for the modelling: **non-commodity charges are dominated by `regional × banded`
+structure**, so any extension of `dispatch_lp` toward bill optimisation needs a region
+identifier and a Red/Amber/Green calendar, not just wholesale prices.
+
+#### 2.5.5 Ancillary / flexibility revenues (the value stack)
+
+A battery or flexible load can *earn* on top of wholesale arbitrage by stacking:
+
+- **Frequency response** products — Dynamic Containment (DC), Dynamic Moderation (DM),
+  Dynamic Regulation (DR). NESO procures these to keep system frequency near 50 Hz; fast
+  batteries are the natural provider. Frequency-services share of GB BESS revenue fell
+  from ~80% (2022) to ~20% (2024) as the market saturated [10].
+- **Balancing Mechanism (BM)** participation as a registered **BMU**. Submit bids/offers
+  to NESO; accepted volumes settle at the BM price. The dominant earner today.
+- **Demand Flexibility Service (DFS)** — a NESO-run scheme that pays load to turn down
+  during declared winter windows.
+
+Empirically, two-hour GB BESS revenue averaged ~**£73k/MW/yr** over the twelve months to
+April 2026, with wholesale + BM contributing ~60% of the stack [10]. The prototype models
+*only* wholesale arbitrage + imbalance — value stacking is the largest gap between this
+model and a real C&I battery business case (see roadmap, §10 #7).
+
+### 2.6 Structural changes on the horizon
+
+Two regulatory programmes are reshaping assumptions baked into §2.2–§2.5 and worth
+flagging because they bound the lifetime of any model built against today's GB:
+
+- **MHHS** — **M**arket-wide **H**alf-**H**ourly **S**ettlement. Rolling out through 2025
+  with phased completion targeted across 2026: every non-half-hourly meter (residential
+  and small SME, historically settled on a *profile*) is migrated to true HH settlement.
+  The relevance for this primer is the same as the §1 footnote: *the energy-form identity
+  survives any change in settlement granularity, the power-form does not*. MHHS-derived
+  data infrastructure is also what would make a future migration to 15-minute settlement
+  (in line with the EU's ISP) operationally possible.
+- **REMA** — **R**eview of **E**lectricity **M**arket **A**rrangements. A multi-year
+  programme considering, among other things, replacing GB's single national clearing
+  price (§2.3) with **zonal pricing** — distinct prices for, say, 7–12 GB zones reflecting
+  transmission constraints. The single-price assumption is the most material model-risk
+  in this primer: every closed-form result above carries an implicit "given GB's current
+  pricing arrangements" qualifier. If enacted, three changes propagate:
+  - the §2.3 reduced form holds **per zone**, with an explicit basis between zones to be
+    modelled and (potentially) hedged;
+  - the §2.5.1 TNUoS locational signal partly collapses into the spot price itself, so
+    the relative importance of network charges vs energy shifts;
+  - PPA valuations become explicitly locational — a wind PPA's capture price now depends
+    on the zone it sits in, not just its technology (§5.5 #3).
+
+A real procurement function tracks REMA delivery dates and structures contracts with
+zonal triggers; a learning prototype can defer this, but the documentation should be
+honest that the simplification is doing real work.
 
 ---
 
@@ -291,9 +554,9 @@ vividly:
 - **Forecast-skill gap** (model vs naive): on the synthetic data the model beats persistence
   by ~90% (the structured intraday shape is highly learnable, while lag-1 naive carries
   yesterday's noise). This gap is *large*.
-- **Economic forecast-error gap** ($B-A$, §7.2): the *absolute* residual is tiny in kW because
-  the synthetic net is smooth, so the money left on the table is small even though skill is
-  high.
+- **Economic forecast-error gap** ($B-A$, §7.2): the absolute energy residual $|\Delta_t|$ is
+  tiny — a handful of MWh over the test window — because the synthetic net is smooth, so
+  the money left on the table is small even though skill is high.
 
 So the README's "the forecast is easy" refers to the **small absolute residual**, not to a
 strong naive baseline. On *real, noisy* data both the residual and the economic gap widen,
@@ -305,11 +568,23 @@ headline skill over a baseline.**
 
 Both legs of $n_t = L_t - S_t$ are weather-driven, on different horizons:
 
-- **Solar $S_t$.** Physically, $S_t \approx \eta_{\text{PV}}\,A\,\text{GHI}_t\,(1-\text{cloud}_t)$
-  where **GHI** is Global Horizontal Irradiance. A robust pipeline separates the deterministic
-  **clear-sky** envelope (a closed-form function of solar geometry — date, time, latitude) from
-  the stochastic **cloud** attenuation. Forecasting then targets the clear-sky index
-  $k_t = S_t/S^{\text{clear}}_t \in [0,1]$, which is far more stationary than $S_t$ itself.
+- **Solar.** Decompose PV output once, into a deterministic clear-sky envelope and a
+  stochastic clear-sky index. The instantaneous PV **power** is
+  $$P^S(s) \;\approx\; \eta_{\text{PV}}\,A\,\text{GHI}^{\text{clear}}(s)\,k(s) \quad [\text{W}],$$
+  where $\eta_{\text{PV}}$ is the **panel + system efficiency** (DC→AC, soiling,
+  temperature derate; typically $\approx 0.15$–$0.20$ for a modern installation), $A$ is
+  the **panel area** [m²], $\text{GHI}^{\text{clear}}(s)$ is the **clear-sky** Global
+  Horizontal Irradiance [W/m²] — a closed-form function of solar geometry (date, time,
+  latitude) — and $k(s) \in [0,1]$ is the **clear-sky index**, the stochastic attenuation
+  due to cloud, aerosols, dust, etc. The **energy** that enters the conservation identity
+  of §1 is the SP integral $S_t = \int_{\text{SP } t} P^S(s)\,ds$ [MWh per SP] — typically
+  approximated as $\bar P^S_t \cdot \Delta t$ with $\bar P^S_t$ the SP-averaged PV power.
+  **A robust pipeline forecasts $k_t = \bar P^S_t / \bar P^{S,\text{clear}}_t$** rather
+  than $\bar P^S_t$ directly: $k_t$ is far more stationary across seasons and latitudes
+  than the raw output it scales, so the same model generalises across sites and months.
+  (The prototype's `synth_solar` in `data.py` carries the same decomposition implicitly —
+  a `seasonal × bell` envelope times a beta-distributed cloud factor — without naming
+  $k_t$ explicitly.)
 - **Load $L_t$.** Temperature drives heating and cooling, classically captured by **HDD/CDD**
   (Heating/Cooling Degree Days), $\text{HDD}=\max(0,T_{\text{base}}-T)$, with strong
   calendar (occupancy) structure for C&I sites.
@@ -370,19 +645,169 @@ long-side cost. The newsvendor is the reduced form; the covariance is the mechan
 The prototype's roadmap item "hedge to q50 but hold battery headroom sized by q10–q90" is a
 practical, layered version of this idea.
 
+**A worked toy.** Suppose forecast volume $D \sim \mathcal{N}(5,\,1^2)$ MWh, the
+front-quarter forward trades at $\pi^{\text{fwd}}=£85$/MWh, the *expected short-side
+cash-out* (averaged over the half-hours in which we end up short — i.e. tight system,
+spiking prices) is $\mathbb{E}[\pi^{\text{imb}} \mid D>h] = £120$/MWh, and the
+*expected long-side cash-out* (we are long when the system is slack and prices have
+dropped) is $\mathbb{E}[\pi^{\text{imb}} \mid D<h] = £55$/MWh. Then
+$c_u = 120 - 85 = £35$/MWh, $c_o = 85 - 55 = £30$/MWh, the critical fractile is
+$c_u/(c_u+c_o) = 35/65 \approx 0.54$, and
+$h^\star = F_D^{-1}(0.54) = 5 + 1\cdot\Phi^{-1}(0.54) \approx 5.10$ MWh —
+hedge to the **54th percentile**, slightly above the median. Notice the
+asymmetry comes entirely through the *conditional* expectations of cash-out, not
+through any difference in the headline imbalance price formula. The covariance of
+§2.4 is the *only* reason the optimal hedge is not exactly at the median.
+
 ### 5.3 Beyond the single newsvendor
 
 Real hedging is multi-period and path-dependent (you re-hedge as the horizon shrinks and
 information arrives), which generalises to **multistage stochastic programming** and to
-risk-aware objectives such as minimising **Conditional Value-at-Risk** (**CVaR**) rather than
-expected cost:
+risk-aware objectives. **Conditional Value-at-Risk** at level $\alpha$ — the expected
+cost *conditional on being in the worst $1-\alpha$ tail*,
 
 $$
-\min_{h}\; \mathbb{E}[C(h)] + \lambda\,\text{CVaR}_\alpha[C(h)],
+\text{CVaR}_\alpha(C) \;=\; \mathbb{E}\big[C \,\big|\, C \ge \text{VaR}_\alpha(C)\big],
 $$
 
-trading expected cost against tail risk via $\lambda$. This is the natural home for the
-quantile/scenario outputs of the forecaster and the obvious bridge between §4 and §6.
+where $\text{VaR}_\alpha(C) = \inf\{c : \Pr(C \le c)\ge\alpha\}$ is the $\alpha$-quantile
+of the loss — is the standard coherent risk measure (unlike variance, it is sub-additive
+and convex, so portfolio diversification provably helps). Minimising
+
+$$
+\min_{h}\; \mathbb{E}[C(h)] + \lambda\,\text{CVaR}_\alpha[C(h)]
+$$
+
+trades expected cost against tail risk via $\lambda \ge 0$. This is the natural home for
+the quantile/scenario outputs of the forecaster and the obvious bridge between §4 and §6.
+
+### 5.4 The procurement stack in practice
+
+The newsvendor of §5.2 collapses procurement into a single quantity decision. In a real
+C&I procurement function the decision is a **stack** with four orthogonal axes — choose
+each independently, optimise the joint:
+
+1. **Hedge ratio** $\rho \in [0,1]$ — the fraction of forecast volume locked at any
+   point in time. Buyers run a target ratio that *increases* as delivery approaches
+   (more of next month locked than of next year), reflecting that volume uncertainty
+   falls as the horizon shrinks.
+
+2. **Tenor** — standardised forward block lengths. The GB OTC market trades:
+   - **Month** (`M+1`, `M+2`, …) — the next calendar months.
+   - **Quarter** (`Q+1`, …) — calendar quarters.
+   - **Season** — `Sum` (Apr–Sep) and `Win` (Oct–Mar), the legacy GB front product.
+   - **Calendar year** (`Cal+1`, e.g. `Cal-27`) — the most liquid long-dated tenor.
+
+   Within each tenor, the **baseload** block is 24×7 across all SPs and the **peak**
+   block is working-day daytime (conventionally Mon–Fri 07:00–19:00). An **off-peak**
+   position is built implicitly as `baseload − peak` rather than traded directly.
+
+3. **Product type** — three families, distinct in *who bears which risk*:
+   - **Fixed-shape block.** A forward at a fixed £/MWh for a flat MW shape. The buyer
+     bears the *shape risk* — anything consumed off-shape settles at spot/cash-out.
+   - **PPA** (Power Purchase Agreement; see §5.5). A bilateral long-dated contract
+     delivering a *generator's* output. Transfers price risk to the buyer but introduces
+     shape risk and cannibalisation of a particular kind.
+   - **Index / spot** — pay $\pi^{\text{DA}}_t$ as it clears, with a fixed supplier
+     margin. Zero price hedge; minimum cost in falling markets, maximum in rising.
+
+4. **Trade timing — layering / "click" strategies.** Rather than fix the target ratio
+   in a single trade, buyers *layer* over time: e.g. fix 10% of `Cal-27` each month
+   from `M-18` to `M-9`, then hold. On average (by Jensen, with martingale forwards) the
+   ex-ante expected cost is the same as a single trade at the mean; layering trades
+   expected cost against *regret variance* — behavioural insurance against picking a bad
+   trade date, valuable when the procurement function is judged ex post.
+
+A typical C&I cover position at $\tau$ months before delivery year $Y$ then aggregates as
+
+$$
+\text{cover}^{(Y)}_\tau \;=\; \underbrace{\sum_B \rho^{\text{block}}_{B,\tau}\, E^{\text{block}}_B}_{\text{flexible blocks (deterministic energy)}} \;+\; \underbrace{\sum_g \rho^{\text{PPA}}_{g,\tau}\, \mathbb{E}\!\left[E^{\text{PPA}}_{g,\tau}\right]}_{\text{PPAs (random energy, taken in expectation)}} \;+\; \underbrace{(\text{spot residual})_{\tau}}_{\text{index}}.
+$$
+
+The optimisation problem is to choose $\{\rho^{\text{block}}_B,\rho^{\text{PPA}}_g\}$ —
+the pre-commitment quantities — under joint price and volume uncertainty, subject to a
+tail-risk constraint (CVaR, §5.3) and any policy constraint (e.g. **Scope 2** carbon
+targets that mandate a minimum renewable share, forcing a minimum PPA fraction).
+
+This is precisely the problem the prototype's roadmap items 4–5 implement, and is the
+natural consumer of the quantile forecasts produced by §4 and the price scenarios from
+the §2.3 reduced form.
+
+### 5.5 PPAs: shape risk and cannibalisation
+
+A **Power Purchase Agreement** is a bilateral long-term (typically 10–20 year) contract
+for the output of a specific generator $g$, at an agreed **strike** $K$ [£/MWh] —
+sometimes inflation-indexed, sometimes fixed-nominal. In GB, **corporate PPAs** today
+are almost exclusively renewable (wind, solar, increasingly battery hybrids), motivated
+on the buyer side by **Scope 2** / **REGO** (Renewable Energy Guarantees of Origin)
+claims and on the seller side by the need to underwrite project financing.
+
+Two contract forms:
+
+- **Physical PPA.** Generation $G_t$ flows into the buyer's settlement account via a
+  route-to-market intermediary; the buyer pays $K \cdot G_t$ for every MWh delivered.
+- **Virtual PPA (vPPA / "synthetic").** No physical delivery — a financial **contract
+  for differences** on $\pi^{\text{DA}}_t$. If $\pi^{\text{DA}}_t > K$ the *generator*
+  pays the buyer $(\pi^{\text{DA}}_t - K)\cdot G_t$; if below, the *buyer* pays. The
+  buyer continues to consume the spot market and uses the vPPA cash flow as a price
+  hedge plus a REGO claim. vPPAs dominate corporate PPAs in 2026 because they are
+  legally simpler and decouple the hedge from the buyer's physical supply chain.
+
+Per-SP cost from a vPPA covering generation $G_t$ [MWh per SP]:
+
+$$
+C^{\text{PPA}}_t \;=\; (K - \pi^{\text{DA}}_t)\,G_t \quad [\pounds],
+$$
+
+with $C^{\text{PPA}}_t < 0$ (revenue to the buyer) whenever $\pi^{\text{DA}}_t > K$.
+
+**Three risks distinguish a PPA from a flat baseload block.**
+
+**1. Shape risk.** $G_t$ is the *generator's* shape, not the buyer's load. A
+midday-peaking solar PPA partially hedges a daytime cooling load but barely touches a
+winter evening peak. The mismatch $\sum_t |G_t - \alpha\, n_t|$, for the volume scaler
+$\alpha = \mathbb{E}[\sum_t n_t]/\mathbb{E}[\sum_t G_t]$, is the residual that must
+still be procured in shorter-dated markets.
+
+**2. Cannibalisation (capture-price erosion).** A renewable asset only earns
+$\pi^{\text{DA}}_t$ when it is generating. Because *all* solar generates at the same
+times — and similarly for wind — high VRE penetration *depresses the very prices the
+asset captures*. Formally, the asset's **capture price** is the generation-weighted
+average
+
+$$
+\bar\pi^{\text{cap}}_g \;=\; \frac{\sum_t G^g_t\, \pi^{\text{DA}}_t}{\sum_t G^g_t},
+$$
+
+and the **capture rate** $\bar\pi^{\text{cap}}_g / \overline{\pi^{\text{DA}}}$ falls as
+the fleet of like technology grows. In §2.3's reduced form, $\beta_{\text{ren}}\,r_t$ is
+precisely the cannibalisation channel: $r_t$ rises *when* $G^g_t$ is high, so the price
+the asset earns is systematically below the time-averaged spot. The prototype's
+`vre_share` and `vre_mw` series in `data.py` carry the same information; pricing a PPA
+correctly means evaluating $K$ against $\bar\pi^{\text{cap}}_g$ rather than against the
+headline forward curve.
+
+**3. Basis risk.** Even with $\Delta t$ matching, the asset's locational marginal price
+(in a future zonal world — §2.6) or its imbalance settlement vs the DA reference may
+differ from the contract reference. Basis is small in GB today, material under REMA's
+zonal scenarios.
+
+**A defensible PPA fair value.** The buyer's mark-to-market is
+
+$$
+\text{MtM} \;=\; \mathbb{E}\!\left[\sum_t (K - \pi^{\text{DA}}_t)\,G^g_t\right]
+\;=\; K\,\mathbb{E}\!\left[\sum_t G^g_t\right] \;-\; \sum_t \mathbb{E}\!\left[\pi^{\text{DA}}_t G^g_t\right],
+$$
+
+and the second term is *not* $\sum_t \mathbb{E}[\pi^{\text{DA}}_t]\cdot \mathbb{E}[G^g_t]$
+— the covariance penalty $\sum_t \text{Cov}(\pi^{\text{DA}}_t, G^g_t)$ (negative for
+correlated renewables) is the cannibalisation discount expressed in pounds. Pricing
+reduces to a *joint* model of $(\pi^{\text{DA}}, G^g)$ with the right correlation
+structure — which the §2.3 reduced form already provides at the population level
+(windier hours have both higher $G^{\text{wind}}_t$ and lower $\pi^{\text{DA}}_t$).
+Modern practice for harder joint distributions uses **deep hedging** [9] — training a
+neural network to replicate the residual exposure via trades in the available
+forwards — when closed-form solutions are out of reach.
 
 ---
 
@@ -390,28 +815,47 @@ quantile/scenario outputs of the forecaster and the obvious bridge between §4 a
 
 ### 6.1 The deterministic LP
 
-Given a (forecast or actual) net path $\{n_t\}$, a price path $\{\pi_t\}$, and a battery, we
-choose per-period charge $c_t\ge 0$, discharge $d_t\ge 0$, state of charge $\text{SoC}_t$, and
-grid draw $g_t$ to minimise energy cost. With round-trip efficiency split as charge/discharge
-efficiency $\eta$, capacity $\bar E$ (kWh), power rating $\bar P$ (kW) and step
-$\Delta t = 0.5$ h:
+**This section is the one place in the doc that takes its decision variables in power
+units, deliberately.** Battery rate limits ($\bar P$ kW) and SoC capacity ($\bar E$ kWh)
+are physical specs of the asset, not energies-per-SP. So the LP variables — charge $c_t$,
+discharge $d_t$, grid draw $g_t$ — are SP-averaged powers [kW]; their corresponding
+energies are $E^c_t = c_t \Delta t$, etc. We mark this slight notation switch explicitly:
+
+> *Within this section,* $n_t$ *is the SP-averaged net **power** [kW] — i.e. the §1 net
+> energy divided by $\Delta t$. The two views are interchangeable here because every SP has
+> the same length.*
+
+With round-trip efficiency split as charge/discharge efficiency $\eta$, capacity $\bar E$
+[kWh], power rating $\bar P$ [kW] and step $\Delta t = 0.5$ h:
 
 $$
 \begin{aligned}
-\min_{c,d,\text{SoC},g}\quad & \sum_{t} \pi_t\, g_t\, \frac{\Delta t}{1000} \\
+\min_{c,d,\text{SoC},g}\quad & \sum_{t} \pi_t\, g_t\, \tfrac{\Delta t}{1000} && \text{(£/MWh × kW × h / 1000 = £)}\\
 \text{s.t.}\quad
-& g_t = n_t + c_t - d_t && \text{(grid = net + charge − discharge)}\\
-& \text{SoC}_t = \text{SoC}_{t-1} + \big(\eta\,c_t - d_t/\eta\big)\,\Delta t && \text{(storage dynamics)}\\
-& 0 \le \text{SoC}_t \le \bar E,\quad 0 \le c_t,d_t \le \bar P && \text{(capacity, rate limits)}\\
-& \text{SoC}_0 = \sigma_0 \bar E && \text{(initial fill)}
+& g_t = n_t + c_t - d_t && \text{[kW]: power balance over SP } t\\
+& \text{SoC}_t = \text{SoC}_{t-1} + \big(\eta\,c_t - d_t/\eta\big)\,\Delta t && \text{[kWh]: storage dynamics}\\
+& 0 \le \text{SoC}_t \le \bar E,\quad 0 \le c_t,d_t \le \bar P && \text{[kWh] / [kW]: capacity, rate limits}\\
+& \text{SoC}_0 = \sigma_0 \bar E && \text{[kWh]: initial fill}
 \end{aligned}
 $$
 
-This is exactly the `dispatch_lp` formulation. The objective is linear, the constraints are
-linear, so it is a **linear program** solved here by **CBC** (Coin-or Branch and Cut) via
-PuLP. The double application of $\eta$ — multiply on charge, divide on discharge — encodes a
-**round-trip efficiency** of $\eta^2$ (here $0.92^2 \approx 0.85$), a defensible convention
-(an alternative splits losses as $\sqrt{\eta_{\text{rt}}}$ each way).
+The objective's $\Delta t / 1000$ factor is the single legitimate use of the unit
+conversion in this paper: it turns the LP's power decision variable $g_t$ into the energy
+$E^g_t = g_t \Delta t / 1000$ [MWh per SP] that the price actually multiplies. **Equivalent
+energy-form LP.** Substitute energy decision variables $E^c_t = c_t \Delta t /1000$,
+$E^d_t = d_t \Delta t /1000$, $E^g_t = g_t \Delta t /1000$ [MWh] and the LP becomes:
+objective $\sum_t \pi_t \cdot E^g_t$ (no conversion factor), conservation $E^g_t = n_t +
+E^c_t - E^d_t$ in MWh, rate limit $E^c_t \le \bar P \cdot \Delta t / 1000$, SoC dynamics
+$\text{SoC}_t = \text{SoC}_{t-1} + \eta E^c_t - E^d_t/\eta$ (state and capacity bound now
+in MWh: $\bar E_{\text{MWh}} = \bar E_{\text{kWh}}/1000$). Both formulations have the same
+optimum; the power form matches the prototype's `dispatch_lp` 1:1, the energy form is
+invariant under $\Delta t$ change. Use whichever the rest of your stack speaks.
+
+This is exactly the `dispatch_lp` formulation (power form). The objective is linear, the
+constraints are linear, so it is a **linear program** solved here by **CBC** (Coin-or
+Branch and Cut) via PuLP. The double application of $\eta$ — multiply on charge, divide on
+discharge — encodes a **round-trip efficiency** of $\eta^2$ (here $0.92^2 \approx 0.85$), a
+defensible convention (an alternative splits losses as $\sqrt{\eta_{\text{rt}}}$ each way).
 
 ### 6.2 Why LP (not MIP) is the right first cut
 
@@ -459,19 +903,29 @@ uncertainty implies before investing in solving the harder stochastic program.
 
 ### 7.1 How settlement is modelled
 
-You **trade day-ahead to your forecast** grid position $g^{\text{f}}_t$ (the LP's `grid_kw`
-computed on the forecast). Reality delivers actual net $n^{\text{a}}_t$; applying the
-*pre-committed* battery schedule to the actual net gives the actual grid
-$g^{\text{a}}_t = n^{\text{a}}_t + c_t - d_t$. The residual is settled at cash-out:
+You **trade day-ahead to your forecast** grid position. Let $E^{g,f}_t$ [MWh per SP] be the
+forecast grid energy in SP $t$, computed from the LP's power output $g^f_t$ [kW] as
+$E^{g,f}_t = g^f_t \Delta t / 1000$. Reality delivers actual net energy $n^a_t$ [MWh];
+applying the *pre-committed* battery schedule to the actual net gives the actual grid
+energy $E^{g,a}_t = n^a_t + (c_t - d_t)\Delta t / 1000$ [MWh]. The residual is settled at
+cash-out:
 
 $$
-C \;=\; \underbrace{\sum_t \pi^{\text{DA}}_t\, g^{\text{f}}_t\,\tfrac{\Delta t}{1000}}_{\text{bought ahead}} \;+\; \underbrace{\sum_t \pi^{\text{imb}}_t\, \big(g^{\text{a}}_t - g^{\text{f}}_t\big)\,\tfrac{\Delta t}{1000}}_{\text{imbalance}}.
+C \;=\; \underbrace{\sum_t \pi^{\text{DA}}_t\, E^{g,f}_t}_{\text{bought ahead}} \;+\; \underbrace{\sum_t \pi^{\text{imb}}_t\, \big(E^{g,a}_t - E^{g,f}_t\big)}_{\text{imbalance}} \quad [\pounds].
 $$
 
-Because the battery schedule appears in *both* $g^{\text{a}}$ and $g^{\text{f}}$, it cancels
-in the residual: $g^{\text{a}}_t - g^{\text{f}}_t = n^{\text{a}}_t - n^{\text{f}}_t$. So **the
-imbalance is exactly the forecast error priced at cash-out** — a clean, correct result that is
-the conceptual heart of the prototype.
+Each term is price [£/MWh] × energy [MWh]; the $\Delta t / 1000$ conversion lives once,
+where the LP's power outputs cross into the energy world, not in every cost formula.
+Because the battery schedule appears in *both* $E^{g,a}$ and $E^{g,f}$, it cancels in the
+residual:
+
+$$
+E^{g,a}_t - E^{g,f}_t \;=\; n^a_t - n^f_t \quad [\text{MWh per SP}].
+$$
+
+So **the imbalance is exactly the energy forecast error priced at cash-out** — a clean,
+correct result that is the conceptual heart of the prototype, and one that survives any
+change of $\Delta t$ because it never mentions $\Delta t$.
 
 ### 7.2 The three-strategy decomposition
 
@@ -687,3 +1141,12 @@ Cited sparingly — only foundational sources.
    reference text linking forecasting, market timeline, and stochastic optimisation.
 8. **Birge, J. R., & Louveaux, F. (2011).** *Introduction to Stochastic Programming* (2nd ed.).
    Springer. — Newsvendor, multistage stochastic programming, the math under §5–§6.
+9. **Limmer, B., et al. (2025).** "Deep Hedging of Green PPAs in Electricity Markets."
+   arXiv:2503.13056. https://arxiv.org/abs/2503.13056 — A data-driven hedging policy for
+   the joint price/quantity risk of §5.5; entry point to deep-hedging adapted to
+   electricity, where the joint $(\pi, G)$ distribution is too complex for closed-form
+   PPA valuation.
+10. **Modo Energy.** "How does a battery energy storage system make money?"
+    https://modoenergy.com/research/en/how-does-battery-energy-storage-make-money —
+    Practitioner reference for the GB BESS revenue stack discussed in §2.5.5 (frequency
+    response share, BM dominance, ~£73k/MW/yr 2-hour BESS benchmark) and roadmap §10 #7.

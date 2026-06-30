@@ -9,6 +9,13 @@ exception is dispatch_lp, which keeps its decision variables as SP-averaged
 powers in kW per primer §6.1 — the boundary conversion happens once per LP
 call, via _kw_to_mwh, on the way into settle.
 
+Scope: this layer is the SHORT-HORIZON end of primer §8's loop. Two layers are
+deliberately out of scope and noted on the roadmap:
+  * Long-horizon procurement / hedging (primer §5) — forward stack, PPAs,
+    newsvendor sizing. Not implemented.
+  * Non-commodity charges (primer §2.5) — TNUoS, DUoS Red bands, BSUoS, CM,
+    levies. The price series here is wholesale + cash-out only.
+
 DISPATCH: given the forecast net position and a battery, decide charge/discharge
 per half-hour to minimise expected energy cost.
 
@@ -16,10 +23,12 @@ SETTLE: you trade day-ahead to your FORECAST net. Reality differs. The residual
 (actual - forecast, after battery) settles at the IMBALANCE price. Better forecast
 -> smaller residual -> smaller imbalance cost. That is the whole commercial point.
 
-We compare three strategies to make the loop legible:
+We compare three strategies (primer §7.2) to make the loop legible:
   A. perfect-foresight + battery   (theoretical floor on cost)
   B. forecast + battery            (what you'd actually run)
   C. forecast, no battery          (isolates the battery's value)
+Naming gotcha: these are DISPATCH-LAYER strategies, distinct from the three
+DECISION LAYERS of the README (procurement / PPA / dispatch).
 """
 from __future__ import annotations
 import pandas as pd
